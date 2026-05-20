@@ -8,3 +8,6 @@ Scripts/.codex
 # Local binaries/downloads
 Scripts/yt-dlp
 
+.config/zsh/.zcompdump-*
+.config/zsh/.zcompdump-*
+.config/zsh/.zsh_history
