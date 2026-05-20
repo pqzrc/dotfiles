@@ -18,7 +18,6 @@ alias ... 'cd ../..'
 
 # ── Editors ──
 abbr -a n nvim
-alias zed 'zeditor'
 abbr -a c 'code .'
 
 # ── Config files ──
@@ -80,10 +79,3 @@ abbr -a tmuxk 'tmux kill-session'
 abbr -a chx 'chmod +x'
 abbr -a x exit
 
-# ── Snapper / BTRFS ──
-abbr -a slsr 'sudo snapper -c root list'
-abbr -a slsh 'sudo snapper -c home list'
-abbr -a sdu 'sudo btrfs filesystem du -s /.snapshots/*'
-abbr -a sdelr 'sudo snapper -c root delete'
-abbr -a sdelh 'sudo snapper -c home delete --sync'
-abbr -a sbdel 'sudo btrfs subvolume delete'

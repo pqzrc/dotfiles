@@ -40,10 +40,6 @@ if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 fi
 
-# Keychain
-if [[ -o interactive && -w "$HOME/.keychain" ]] && command -v keychain >/dev/null 2>&1; then
-  eval "$(keychain --eval --quiet id_ed25519)"
-fi
 
 if [[ -o interactive ]] && command -v rxfetch >/dev/null 2>&1; then
   rxfetch

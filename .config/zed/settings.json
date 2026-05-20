@@ -14,6 +14,13 @@
 
   "agent_ui_font_size": 11.0,
   "project_panel": {
+    "entry_spacing": "standard",
+    "sticky_scroll": false,
+    "scrollbar": {
+      "show": "never"
+    },
+    "indent_size": 11.0,
+    "default_width": 240.0,
     "hide_hidden": false,
     "dock": "left",
   },

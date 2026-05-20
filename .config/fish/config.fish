@@ -24,10 +24,5 @@ fzf --fish | source
 zoxide init fish | source
 starship init fish | source
 
-# Keychain
-if status is-interactive
-    keychain --eval --quiet id_rsa | source
-end
-
 # Aliases
 source ~/.config/fish/aliases.fish
