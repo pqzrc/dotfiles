@@ -1,129 +1,685 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-[[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
-OUTPUT_DIR="${XDG_VIDEOS_DIR:-$HOME/Videos}"
+# Sway-native recording palette powered by GPU Screen Recorder, slurp and ffmpeg.
+# Recordings stay high quality; "Discordify" creates a separate, size-targeted copy.
 
-if [[ ! -d "$OUTPUT_DIR" ]]; then
-  notify-send "Screen recording directory does not exist: $OUTPUT_DIR" -u critical -t 3000
-  exit 1
+set -uo pipefail
+
+APP_NAME="Sway Recorder"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+
+if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" ]]; then
+  # shellcheck source=/dev/null
+  source "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
 fi
 
-DESKTOP_AUDIO="false"
-MICROPHONE_AUDIO="false"
-WEBCAM="false"
-STOP_RECORDING="false"
+VIDEOS_ROOT="${XDG_VIDEOS_DIR:-$HOME/Videos}"
+OUTPUT_DIR="${SWAY_RECORD_DIR:-$VIDEOS_ROOT/Recordings}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/sway-recorder-${UID}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/sway-recorder"
+STATE_FILE="$RUNTIME_DIR/current"
+LAST_RECORDING_FILE="$STATE_DIR/last-recording"
+LAST_EXPORT_FILE="$STATE_DIR/last-export"
+LOG_FILE="$STATE_DIR/recorder.log"
 
-for arg in "$@"; do
-  case "$arg" in
-  --with-desktop-audio) DESKTOP_AUDIO="true" ;;
-  --with-microphone-audio) MICROPHONE_AUDIO="true" ;;
-  --with-webcam) WEBCAM="true" ;;
-  --stop-recording) STOP_RECORDING="true" ;;
-  esac
-done
+notify() {
+  local urgency="$1"
+  local title="$2"
+  local body="${3:-}"
+  local icon="${4:-video-display}"
+  notify-send --app-name="$APP_NAME" --urgency="$urgency" --icon="$icon" \
+    --expire-time=4000 "$title" "$body"
+}
+
+require_commands() {
+  local missing=()
+  local command_name
+
+  for command_name in "$@"; do
+    command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
+  done
+
+  if ((${#missing[@]})); then
+    notify critical "Missing recording tools" \
+      "Install: ${missing[*]}" dialog-error
+    return 1
+  fi
+}
+
+prepare_directories() {
+  mkdir -p -- "$OUTPUT_DIR" "$RUNTIME_DIR" "$STATE_DIR"
+}
+
+toggle_screenrecording_indicator() {
+  pkill -RTMIN+8 -x waybar 2>/dev/null || true
+}
 
 cleanup_webcam() {
-  pkill -f "WebcamOverlay" 2>/dev/null
+  pkill -f 'WebcamOverlay' 2>/dev/null || true
+}
+
+recording_pid() {
+  local pid=""
+
+  if [[ -r "$STATE_FILE" ]]; then
+    IFS=$'\t' read -r pid _ _ <"$STATE_FILE" || true
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    rm -f -- "$STATE_FILE"
+  fi
+
+  pgrep -fo '(^|/)gpu-screen-recorder( |$)' 2>/dev/null
+}
+
+screenrecording_active() {
+  recording_pid >/dev/null 2>&1
+}
+
+watch_recording() {
+  local watched_pid="$1"
+  local filename="$2"
+  local state_pid=""
+  local state_status=""
+
+  while kill -0 "$watched_pid" 2>/dev/null; do
+    sleep 0.5
+  done
+
+  [[ -r "$STATE_FILE" ]] || return 0
+  IFS=$'\t' read -r state_pid _ state_status <"$STATE_FILE" || true
+  [[ "$state_pid" == "$watched_pid" && "$state_status" == recording ]] || return 0
+
+  rm -f -- "$STATE_FILE"
+  cleanup_webcam
+  toggle_screenrecording_indicator
+
+  if [[ -s "$filename" ]] && (($(stat -c %s -- "$filename") > 1024)); then
+    printf '%s\n' "$filename" >"$LAST_RECORDING_FILE"
+    notify critical "Recorder stopped unexpectedly" \
+      "A partial video was kept: $(basename "$filename")" dialog-warning
+  else
+    notify critical "Recorder stopped unexpectedly" \
+      "No valid video was produced. See $LOG_FILE" dialog-error
+  fi
+}
+
+focused_output() {
+  swaymsg -t get_outputs -r 2>/dev/null |
+    jq -r '.[] | select(.focused and .active) | .name' |
+    head -n 1
+}
+
+microphone_source() {
+  if pactl list sources short 2>/dev/null | grep -q $'\teasyeffects_source\t'; then
+    printf '%s\n' 'easyeffects_source'
+  else
+    printf '%s\n' 'default_input'
+  fi
 }
 
 start_webcam_overlay() {
+  require_commands ffplay v4l2-ctl || return 1
   cleanup_webcam
 
-  # Get monitor scale (fallback to 1.0 for Sway)
-  local scale=1.0
-  # Try to get scale from Sway if possible
-  if command -v swaymsg >/dev/null; then
-    scale=$(swaymsg -t get_outputs | jq -r '.[] | select(.focused == true) | .scale // 1.0' | head -1)
-  fi
+  local scale="1"
+  local target_width
+  local resolution
+  local video_size_args=()
+  local available_formats
 
-  # Target width (base 360px, scaled to monitor)
-  local target_width=$(awk "BEGIN {printf \"%.0f\", 360 * $scale}")
+  scale="$(swaymsg -t get_outputs -r 2>/dev/null |
+    jq -r '.[] | select(.focused) | .scale // 1' | head -n 1)"
+  target_width="$(awk -v scale="${scale:-1}" 'BEGIN { printf "%.0f", 360 * scale }')"
+  available_formats="$(v4l2-ctl --list-formats-ext -d /dev/video0 2>/dev/null || true)"
 
-  # Try preferred 16:9 resolutions in order, use first available
-  local preferred_resolutions=("640x360" "1280x720" "1920x1080")
-  local video_size_arg=""
-  local available_formats=$(v4l2-ctl --list-formats-ext -d /dev/video0 2>/dev/null)
-
-  for resolution in "${preferred_resolutions[@]}"; do
-    if echo "$available_formats" | grep -q "$resolution"; then
-      video_size_arg="-video_size $resolution"
+  for resolution in 640x360 1280x720 1920x1080; do
+    if grep -q "$resolution" <<<"$available_formats"; then
+      video_size_args=(-video_size "$resolution")
       break
     fi
   done
 
-  ffplay -f v4l2 $video_size_arg -framerate 30 /dev/video0 \
-    -vf "scale=${target_width}:-1" \
-    -window_title "WebcamOverlay" \
-    -noborder \
-    -fflags nobuffer -flags low_delay \
-    -probesize 32 -analyzeduration 0 \
-    -loglevel quiet &
-  sleep 1
+  ffplay -f v4l2 "${video_size_args[@]}" -framerate 30 /dev/video0 \
+    -vf "scale=${target_width}:-1" -window_title WebcamOverlay -noborder \
+    -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+    -loglevel quiet >/dev/null 2>&1 &
 }
 
-start_screenrecording() {
-  local filename="$OUTPUT_DIR/screenrecording-$(date +'%Y-%m-%d_%H-%M-%S').mp4"
-  local audio_devices=""
-  local audio_args=""
+select_region() {
+  slurp -f '%wx%h+%x+%y' \
+    -b 0d0d0dcc -c e0e0e0ff -s 71809655 -w 2
+}
 
-  [[ "$DESKTOP_AUDIO" == "true" ]] && audio_devices+="default_output"
+start_recording() {
+  local capture_mode="$1"
+  local audio_mode="$2"
+  local with_webcam="${3:-false}"
 
-  if [[ "$MICROPHONE_AUDIO" == "true" ]]; then
-    # Use Easy Effects source if available (for mono to stereo conversion), otherwise fallback to default input
-    local mic_source="default_input"
-    if pactl list sources short | grep -q "easyeffects_source"; then
-      mic_source="easyeffects_source"
-    fi
-    
-    [[ -n "$audio_devices" ]] && audio_devices+="|"
-    audio_devices+="$mic_source"
+  require_commands gpu-screen-recorder notify-send || return 1
+  if [[ "$capture_mode" == region ]]; then
+    require_commands slurp || return 1
+  fi
+  if [[ "$capture_mode" == screen ]]; then
+    require_commands swaymsg jq || return 1
+  fi
+  prepare_directories
+
+  if screenrecording_active; then
+    stop_recording
+    return
   fi
 
-  [[ -n "$audio_devices" ]] && audio_args+="-a $audio_devices"
+  local filename=""
+  local capture_label="Selection"
+  local audio_label="Silent"
+  local geometry=""
+  local output=""
+  local mic=""
+  local audio_source=""
+  local capture_args=()
+  local audio_args=()
+  local recorder_pid
+  filename="$OUTPUT_DIR/screenrecording-$(date +'%Y-%m-%d_%H-%M-%S').mp4"
 
-  gpu-screen-recorder -w portal -f 60 -fallback-cpu-encoding yes -o "$filename" $audio_args -ac aac &
+  case "$capture_mode" in
+    region)
+      geometry="$(select_region)" || return 0
+      [[ -n "$geometry" ]] || return 0
+      capture_args=(-w region -region "$geometry")
+      capture_label="Region"
+      ;;
+    screen)
+      output="$(focused_output)"
+      if [[ -z "$output" ]]; then
+        notify critical "Could not find the focused output" \
+          "Try selecting a region instead." dialog-error
+        return 1
+      fi
+      capture_args=(-w "$output")
+      capture_label="$output"
+      ;;
+    *)
+      notify critical "Unknown capture mode" "$capture_mode" dialog-error
+      return 1
+      ;;
+  esac
+
+  case "$audio_mode" in
+    desktop)
+      audio_source="default_output"
+      audio_label="Desktop audio"
+      ;;
+    microphone)
+      audio_source="$(microphone_source)"
+      audio_label="Microphone"
+      ;;
+    both)
+      mic="$(microphone_source)"
+      audio_source="default_output|$mic"
+      audio_label="Desktop + microphone"
+      ;;
+    none)
+      ;;
+    *)
+      notify critical "Unknown audio mode" "$audio_mode" dialog-error
+      return 1
+      ;;
+  esac
+
+  [[ -n "$audio_source" ]] && audio_args=(-a "$audio_source" -ac aac -ab 160)
+  [[ "$with_webcam" == true ]] && start_webcam_overlay
+
+  : >"$LOG_FILE"
+  gpu-screen-recorder "${capture_args[@]}" -f 60 -fm vfr -k h264 \
+    -q very_high -fallback-cpu-encoding yes -exclude-metadata yes \
+    "${audio_args[@]}" -o "$filename" >>"$LOG_FILE" 2>&1 &
+  recorder_pid=$!
+  printf '%s\t%s\trecording\n' "$recorder_pid" "$filename" >"$STATE_FILE"
+
+  sleep 0.4
+  if ! kill -0 "$recorder_pid" 2>/dev/null; then
+    rm -f -- "$STATE_FILE"
+    cleanup_webcam
+    notify critical "Recording could not start" \
+      "See $LOG_FILE" dialog-error
+    return 1
+  fi
+
   toggle_screenrecording_indicator
+  notify normal "Recording $capture_label" \
+    "$audio_label  •  Super+R stops and saves" media-record
+  watch_recording "$recorder_pid" "$filename" &
 }
 
-stop_screenrecording() {
-  pkill -SIGINT -f "^gpu-screen-recorder" # SIGINT required to save video properly
+human_size() {
+  numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || printf '%s bytes' "$1"
+}
 
-  # Wait a maximum of 5 seconds to finish before hard killing
-  local count=0
-  while pgrep -f "^gpu-screen-recorder" >/dev/null && [ $count -lt 50 ]; do
+launch_compression() {
+  local input="$1"
+  local target_mb="${2:-9.5}"
+
+  if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --user --quiet --collect "$SCRIPT_PATH" \
+      --compress "$input" "$target_mb" >/dev/null 2>&1
+  else
+    "$SCRIPT_PATH" --compress "$input" "$target_mb" >/dev/null 2>&1 &
+  fi
+}
+
+ready_notification() {
+  local file="$1"
+  local bytes
+  local action=""
+  bytes="$(stat -c %s -- "$file" 2>/dev/null || printf '0')"
+
+  if [[ "${SWAY_RECORDER_NO_ACTIONS:-0}" == 1 ]]; then
+    notify normal "Discord copy ready · $(human_size "$bytes")" \
+      "$file" emblem-ok-symbolic
+    return
+  fi
+
+  action="$(notify-send --app-name="$APP_NAME" --icon=emblem-ok-symbolic \
+    --expire-time=10000 \
+    --action='folder=Show in folder' \
+    --action='path=Copy path' \
+    "Discord copy ready · $(human_size "$bytes")" "$(basename "$file")" || true)"
+
+  case "$action" in
+    folder) xdg-open "$(dirname "$file")" >/dev/null 2>&1 & ;;
+    path) printf '%s' "$file" | wl-copy ;;
+  esac
+}
+
+stop_recording() {
+  local pid=""
+  local filename=""
+
+  if [[ -r "$STATE_FILE" ]]; then
+    IFS=$'\t' read -r pid filename _ <"$STATE_FILE" || true
+  fi
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+    pid="$(recording_pid 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$pid" ]]; then
+    cleanup_webcam
+    rm -f -- "$STATE_FILE"
+    toggle_screenrecording_indicator
+    notify low "Nothing is recording" "Open the palette with Super+Ctrl+R."
+    return 1
+  fi
+
+  printf '%s\t%s\tstopping\n' "$pid" "$filename" >"$STATE_FILE"
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in {1..100}; do
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
-    count=$((count + 1))
   done
 
-  if pgrep -f "^gpu-screen-recorder" >/dev/null; then
-    pkill -9 -f "^gpu-screen-recorder"
-    cleanup_webcam
-    notify-send "Screen recording error" "Recording process had to be force-killed. Video may be corrupted." -u critical -t 5000
-  else
-    cleanup_webcam
-    notify-send "Screen recording saved to $OUTPUT_DIR" -t 2000
+  if kill -0 "$pid" 2>/dev/null; then
+    notify critical "Recorder is still finishing" \
+      "The video was not force-killed, so it has a chance to remain valid." dialog-warning
+    return 1
   fi
+
+  cleanup_webcam
+  rm -f -- "$STATE_FILE"
   toggle_screenrecording_indicator
-}
 
-toggle_screenrecording_indicator() {
-  pkill -RTMIN+8 waybar
-}
-
-screenrecording_active() {
-  pgrep -f "^gpu-screen-recorder" >/dev/null || pgrep -f "WebcamOverlay" >/dev/null
-}
-
-if screenrecording_active; then
-  if pgrep -f "WebcamOverlay" >/dev/null && ! pgrep -f "^gpu-screen-recorder" >/dev/null; then
-    cleanup_webcam
-  else
-    stop_screenrecording
+  if [[ -z "$filename" || ! -s "$filename" ]]; then
+    filename="$(recent_recording || true)"
   fi
-elif [[ "$STOP_RECORDING" == "false" ]]; then
-  [[ "$WEBCAM" == "true" ]] && start_webcam_overlay
 
-  start_screenrecording || cleanup_webcam
-else
-  exit 1
-fi
+  if [[ -n "$filename" && -s "$filename" ]]; then
+    printf '%s\n' "$filename" >"$LAST_RECORDING_FILE"
+    local action=""
+    local bytes
+    bytes="$(stat -c %s -- "$filename")"
+    action="$(notify-send --app-name="$APP_NAME" --icon=video-x-generic \
+      --expire-time=10000 \
+      --action='discord=Discordify · under 10 MB' \
+      --action='folder=Show in folder' \
+      "Recording saved · $(human_size "$bytes")" "$(basename "$filename")" || true)"
+    case "$action" in
+      discord) launch_compression "$filename" 9.5 ;;
+      folder) xdg-open "$(dirname "$filename")" >/dev/null 2>&1 & ;;
+    esac
+  else
+    notify critical "Recording stopped, but no video was found" \
+      "See $LOG_FILE" dialog-error
+    return 1
+  fi
+}
+
+recent_recording() {
+  local saved=""
+  if [[ -r "$LAST_RECORDING_FILE" ]]; then
+    IFS= read -r saved <"$LAST_RECORDING_FILE" || true
+    [[ -f "$saved" ]] && printf '%s\n' "$saved" && return 0
+  fi
+
+  find "$OUTPUT_DIR" "$VIDEOS_ROOT" -maxdepth 1 -type f \
+    \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' \) \
+    ! -iname '*-discord*.mp4' -printf '%T@\t%p\n' 2>/dev/null |
+    sort -nr | head -n 1 | cut -f 2-
+}
+
+pick_video() {
+  prepare_directories
+  local rows=""
+  local entry=""
+  local path=""
+  local bytes=""
+
+  while IFS= read -r entry; do
+    path="${entry#*$'\t'}"
+    [[ -f "$path" ]] || continue
+    bytes="$(stat -c %s -- "$path" 2>/dev/null || printf '0')"
+    rows+="$path"$'\t'"$(basename "$path")  ·  $(human_size "$bytes")"$'\n'
+  done < <(
+    find "$OUTPUT_DIR" "$VIDEOS_ROOT" -maxdepth 1 -type f \
+      \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' \) \
+      -printf '%T@\t%p\n' 2>/dev/null | sort -nr | head -n 40
+  )
+
+  [[ -n "$rows" ]] || return 1
+  printf '%s' "$rows" | fuzzel --dmenu --only-match --minimal-lines \
+    --lines=10 --width=54 --prompt='Compress  ›  ' \
+    --placeholder='Choose a recording…' --with-nth=2 --accept-nth=1 \
+    --match-nth=2 --selection-radius=6 --border-width=1 \
+    --border-color=404552ff
+}
+
+compression_profile() {
+  local video_kbps="$1"
+  if ((video_kbps >= 5000)); then
+    printf '%s\t%s\t%s\n' 60 2560 1440
+  elif ((video_kbps >= 2800)); then
+    printf '%s\t%s\t%s\n' 60 1920 1080
+  elif ((video_kbps >= 1500)); then
+    printf '%s\t%s\t%s\n' 45 1600 900
+  elif ((video_kbps >= 850)); then
+    printf '%s\t%s\t%s\n' 30 1280 720
+  elif ((video_kbps >= 450)); then
+    printf '%s\t%s\t%s\n' 30 1024 576
+  elif ((video_kbps >= 240)); then
+    printf '%s\t%s\t%s\n' 24 854 480
+  elif ((video_kbps >= 120)); then
+    printf '%s\t%s\t%s\n' 18 640 360
+  else
+    printf '%s\t%s\t%s\n' 12 480 270
+  fi
+}
+
+compress_video() {
+  local input="$1"
+  local target_mb="${2:-9.5}"
+
+  require_commands ffmpeg ffprobe notify-send numfmt || return 1
+  [[ -f "$input" ]] || {
+    notify critical "Video not found" "$input" dialog-error
+    return 1
+  }
+  [[ "$target_mb" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+    notify critical "Invalid size target" "Use a number such as 9.5 or 49." dialog-error
+    return 1
+  }
+
+  local duration=""
+  local max_bytes=""
+  local input_bytes=""
+  local total_kbps=""
+  local audio_kbps=0
+  local video_kbps=""
+  local has_audio=false
+  local fps=""
+  local max_width=""
+  local max_height=""
+  local video_filter=""
+  local base="${input%.*}"
+  local output="${base}-discord.mp4"
+  local temp_dir=""
+  local temp_output=""
+  local passlog=""
+  local notification_id=""
+  local ffmpeg_audio_args=()
+
+  duration="$(ffprobe -v error -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 -- "$input" 2>/dev/null || true)"
+  if ! awk -v duration="$duration" 'BEGIN { exit !(duration > 0) }'; then
+    notify critical "Could not read video duration" \
+      "The file may be incomplete." dialog-error
+    return 1
+  fi
+
+  max_bytes="$(awk -v mb="$target_mb" 'BEGIN { printf "%.0f", mb * 1000000 }')"
+  input_bytes="$(stat -c %s -- "$input")"
+  if ((input_bytes <= max_bytes)); then
+    ready_notification "$input"
+    return 0
+  fi
+
+  if ffprobe -v error -select_streams a:0 -show_entries stream=index \
+    -of csv=p=0 -- "$input" 2>/dev/null | grep -q .; then
+    has_audio=true
+  fi
+
+  total_kbps="$(awk -v bytes="$max_bytes" -v seconds="$duration" \
+    'BEGIN { printf "%.0f", (bytes * 8 * 0.96) / seconds / 1000 }')"
+  if [[ "$has_audio" == true ]]; then
+    if ((total_kbps >= 600)); then
+      audio_kbps=64
+    elif ((total_kbps >= 250)); then
+      audio_kbps=48
+    else
+      audio_kbps=32
+    fi
+  fi
+  video_kbps=$((total_kbps - audio_kbps))
+
+  if ((video_kbps < 48)); then
+    notify critical "This clip is too long for ${target_mb} MB" \
+      "Trim it, or run: screenrecord --compress \"$input\" 49" dialog-warning
+    return 1
+  fi
+
+  IFS=$'\t' read -r fps max_width max_height < <(compression_profile "$video_kbps")
+  video_filter="fps=${fps},scale=w='min(iw,${max_width})':h='min(ih,${max_height})':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
+
+  if [[ -e "$output" ]]; then
+    output="${base}-discord-$(date +'%Y-%m-%d_%H-%M-%S').mp4"
+  fi
+
+  temp_dir="$(mktemp -d "$RUNTIME_DIR/compress.XXXXXX")"
+  temp_output="$temp_dir/output.mp4"
+  passlog="$temp_dir/pass"
+  [[ "$has_audio" == true ]] && ffmpeg_audio_args=(-map '0:a:0?' -c:a aac -b:a "${audio_kbps}k")
+
+  notification_id="$(notify-send --app-name="$APP_NAME" --icon=video-x-generic \
+    --expire-time=0 --print-id "Discordifying… · pass 1 of 2" \
+    "${fps} fps  •  ${max_width}×${max_height} max  •  target ${target_mb} MB")"
+
+  if ! ffmpeg -hide_banner -loglevel error -y -i "$input" \
+    -map 0:v:0 -vf "$video_filter" -c:v libx264 -preset slow \
+    -b:v "${video_kbps}k" -pix_fmt yuv420p -pass 1 \
+    -passlogfile "$passlog" -an -f mp4 /dev/null >>"$LOG_FILE" 2>&1; then
+    notify-send --replace-id="$notification_id" --app-name="$APP_NAME" \
+      --urgency=critical --expire-time=5000 --icon=dialog-error \
+      "Compression failed in pass 1" "See $LOG_FILE"
+    rm -f -- "$passlog-0.log" "$passlog-0.log.mbtree" "$temp_output"
+    rmdir -- "$temp_dir" 2>/dev/null || true
+    return 1
+  fi
+
+  notify-send --replace-id="$notification_id" --app-name="$APP_NAME" \
+    --expire-time=0 --icon=video-x-generic "Discordifying… · pass 2 of 2" \
+    "Optimizing quality and web playback"
+
+  if ! ffmpeg -hide_banner -loglevel error -y -i "$input" \
+    -map 0:v:0 "${ffmpeg_audio_args[@]}" -vf "$video_filter" \
+    -c:v libx264 -preset slow -b:v "${video_kbps}k" -pix_fmt yuv420p \
+    -profile:v high -pass 2 -passlogfile "$passlog" -map_metadata -1 \
+    -movflags +faststart "$temp_output" >>"$LOG_FILE" 2>&1; then
+    notify-send --replace-id="$notification_id" --app-name="$APP_NAME" \
+      --urgency=critical --expire-time=5000 --icon=dialog-error \
+      "Compression failed in pass 2" "See $LOG_FILE"
+    rm -f -- "$passlog-0.log" "$passlog-0.log.mbtree" "$temp_output"
+    rmdir -- "$temp_dir" 2>/dev/null || true
+    return 1
+  fi
+
+  mv -- "$temp_output" "$output"
+  rm -f -- "$passlog-0.log" "$passlog-0.log.mbtree"
+  rmdir -- "$temp_dir" 2>/dev/null || true
+  printf '%s\n' "$output" >"$LAST_EXPORT_FILE"
+  notify-send --replace-id="$notification_id" --app-name="$APP_NAME" \
+    --expire-time=1500 --icon=emblem-ok-symbolic "Compression complete" \
+    "$(basename "$output")"
+  ready_notification "$output"
+}
+
+run_menu() {
+  require_commands fuzzel || return 1
+  prepare_directories
+
+  local menu_rows=""
+  local choice=""
+  if screenrecording_active; then
+    menu_rows+=$'stop\t󰓛  Stop and save recording\n'
+  else
+    menu_rows+=$'region-desktop\t󰹑  Region  ·  desktop audio\n'
+    menu_rows+=$'screen-desktop\t󰍹  Focused screen  ·  desktop audio\n'
+    menu_rows+=$'region-both\t󰕾  Region  ·  desktop + microphone\n'
+    menu_rows+=$'screen-both\t󰑋  Focused screen  ·  desktop + microphone\n'
+    menu_rows+=$'region-silent\t󰖁  Region  ·  silent\n'
+    menu_rows+=$'screen-mic\t󰢹  Focused screen  ·  microphone\n'
+  fi
+  menu_rows+=$'discord-last\t󰧑  Discordify last  ·  under 10 MB\n'
+  menu_rows+=$'discord-pick\t󰈙  Discordify another video…\n'
+  menu_rows+=$'folder\t󰉋  Open recordings\n'
+
+  choice="$(printf '%s' "$menu_rows" | fuzzel --dmenu --only-match \
+    --minimal-lines --lines=9 --width=43 --prompt='Record  ›  ' \
+    --placeholder='Capture or compress…' --with-nth=2 --accept-nth=1 \
+    --match-nth=2 --selection-radius=6 --border-width=1 \
+    --border-color=404552ff 2>/dev/null || true)"
+
+  case "$choice" in
+    stop) stop_recording ;;
+    region-desktop) start_recording region desktop ;;
+    screen-desktop) start_recording screen desktop ;;
+    region-both) start_recording region both ;;
+    screen-both) start_recording screen both ;;
+    region-silent) start_recording region none ;;
+    screen-mic) start_recording screen microphone ;;
+    discord-last)
+      local last=""
+      last="$(recent_recording || true)"
+      if [[ -n "$last" ]]; then
+        launch_compression "$last" 9.5
+      else
+        notify low "No recording found" "$OUTPUT_DIR"
+      fi
+      ;;
+    discord-pick)
+      local picked=""
+      picked="$(pick_video || true)"
+      [[ -n "$picked" ]] && launch_compression "$picked" 9.5
+      ;;
+    folder) xdg-open "$OUTPUT_DIR" >/dev/null 2>&1 & ;;
+  esac
+}
+
+show_help() {
+  printf '%s\n' \
+    'Usage: screenrecord [command]' \
+    '' \
+    '  --menu                       Open the recording palette' \
+    '  --stop-recording             Stop and safely save' \
+    '  --with-desktop-audio         Toggle focused-screen recording + desktop audio' \
+    '  --with-microphone-audio      Toggle focused-screen recording + microphone' \
+    '  --compress-last              Make the last video smaller than 10 MB' \
+    '  --compress FILE [SIZE_MB]    Make an exact-size shareable MP4' \
+    '' \
+    'Environment:' \
+    '  SWAY_RECORD_DIR              Recording directory (default: Videos/Recordings)'
+}
+
+main() {
+  case "${1:-}" in
+    --menu)
+      run_menu
+      return
+      ;;
+    --stop-recording)
+      stop_recording
+      return
+      ;;
+    --compress-last)
+      prepare_directories
+      local last=""
+      last="$(recent_recording || true)"
+      if [[ -n "$last" ]]; then
+        launch_compression "$last" 9.5
+      else
+        notify low "No recording found" "$OUTPUT_DIR"
+      fi
+      return
+      ;;
+    --compress)
+      [[ -n "${2:-}" ]] || {
+        show_help
+        return 2
+      }
+      prepare_directories
+      compress_video "$2" "${3:-9.5}"
+      return
+      ;;
+    --help|-h)
+      show_help
+      return
+      ;;
+  esac
+
+  if (($# == 0)); then
+    if screenrecording_active; then
+      stop_recording
+    else
+      run_menu
+    fi
+    return
+  fi
+
+  local desktop=false
+  local microphone=false
+  local webcam=false
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      --with-desktop-audio) desktop=true ;;
+      --with-microphone-audio) microphone=true ;;
+      --with-webcam) webcam=true ;;
+      *)
+        notify critical "Unknown option" "$argument" dialog-error
+        return 2
+        ;;
+    esac
+  done
+
+  if screenrecording_active; then
+    stop_recording
+  elif [[ "$desktop" == true && "$microphone" == true ]]; then
+    start_recording screen both "$webcam"
+  elif [[ "$desktop" == true ]]; then
+    start_recording screen desktop "$webcam"
+  elif [[ "$microphone" == true ]]; then
+    start_recording screen microphone "$webcam"
+  else
+    start_recording screen none "$webcam"
+  fi
+}
+
+main "$@"

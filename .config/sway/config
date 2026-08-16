@@ -184,8 +184,10 @@ bindsym $mod+XF86AudioMute exec ~/Scripts/audio-switch
 bindsym $mod+Shift+n exec makoctl dismiss -a
 bindsym $mod+n exec makoctl restore
 bindsym $mod+Alt+n exec ~/Scripts/toggle-wlsunset
+# Recording: quick toggles plus a capture/compression palette.
 bindsym $mod+R exec ~/Scripts/screenrecord --with-desktop-audio 
 bindsym $mod+Shift+R exec ~/Scripts/screenrecord --with-microphone-audio 
+bindsym $mod+Ctrl+R exec ~/Scripts/screenrecord --menu
 bindsym $mod+P exec ~/Scripts/screenshot
 bindsym $mod+Shift+P exec ~/Scripts/screenshot fullscreen
 bindsym Print exec ~/Scripts/screenshot fullscreen

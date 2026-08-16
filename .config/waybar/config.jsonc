@@ -38,6 +38,7 @@
   },
   "custom/screenrecording-indicator": {
     "on-click": "~/Scripts/screenrecord",
+    "on-click-right": "~/Scripts/screenrecord --compress-last",
     "exec": "~/Scripts/indicator-record",
     "signal": 8,
     "return-type": "json"

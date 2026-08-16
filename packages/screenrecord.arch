@@ -1,0 +1,13 @@
+ffmpeg
+fuzzel
+gpu-screen-recorder
+jq
+libnotify
+mako
+pipewire-pulse
+slurp
+sway
+v4l-utils
+waybar
+wl-clipboard
+xdg-utils

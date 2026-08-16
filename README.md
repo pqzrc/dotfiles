@@ -45,3 +45,15 @@ This links files from `~/dotfiles` into the normal places, like:
 ~/Scripts -> ~/dotfiles/Scripts
 ```
 
+## Screen recording
+
+Install the Arch Linux packages used by the Sway recording and Discord
+compression workflow:
+
+```sh
+cd ~/dotfiles
+sudo pacman -S --needed - < packages/screenrecord.arch
+```
+
+The recorder automatically targets the focused Sway output, so the same
+configuration works with desktop outputs and laptop panels.
