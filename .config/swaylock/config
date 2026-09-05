@@ -1,16 +1,7 @@
-# --- Appearance & Blur ---
-# image=~/Wallpapers/monochrome/mac__.jpg
-screenshots
-clock
-indicator
-indicator-radius=100
-indicator-thickness=10
-
-# Performance Trick: Downscale before blurring for instant locking
-effect-scale=0.5
-effect-blur=7x5
-effect-scale=2
-effect-vignette=0.5:0.5
+# Standard swaylock options; no swaylock-effects dependency.
+color=1f2430
+indicator-radius=70
+indicator-thickness=6
 
 # --- Midnight Obsidian Colors ---
 ring-color=3e4451
@@ -29,6 +20,4 @@ text-wrong-color=e06c75
 # --- Behavior ---
 ignore-empty-password
 show-failed-attempts
-font="Inter"
-datestr=%a, %B %e
-timestr=%I:%M %p
+font=DejaVu Sans

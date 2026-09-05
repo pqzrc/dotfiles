@@ -52,12 +52,12 @@ clear_notifications() {
 lock_and_suspend() {
 	local i=$LOCK_TIMEOUT
 	while [[ $i -gt 0 ]]; do
+		is_charging && return 0
 		notify-send -u critical -t 1100 "Battery Critical" "Suspending in ${i}s..."
 		sleep 1
 		((i--))
 	done
-	swaylock -f
-	systemctl suspend
+	"$HOME/Scripts/lock-session" suspend
 }
 
 while true; do

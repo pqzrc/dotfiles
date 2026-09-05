@@ -1,3 +1,3 @@
-function sessionizer --description "Launch sessionX script"
-    $HOME/Scripts/sessionX
+function sessionizer --description "Choose a project in tmux"
+    $HOME/Scripts/sessionizer
 end

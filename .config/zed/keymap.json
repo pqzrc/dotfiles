@@ -22,5 +22,16 @@
     "bindings": {
       "ctrl-shift-e": "project_panel::Toggle"
     }
+  },
+  {
+    "context": "!Terminal",
+    "unbind": {
+      "ctrl-shift-c": "collab_panel::ToggleFocus"
+    }
+  },
+  {
+    "bindings": {
+      "ctrl-shift-c": "collab_panel::Toggle"
+    }
   }
 ]

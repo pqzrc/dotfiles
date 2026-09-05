@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+roots=()
+for name in School Projects Work Git Documents/BRAIN; do
+    [[ -d "$HOME/$name" ]] && roots+=("$HOME/$name")
+done
+((${#roots[@]})) || exit 0
+selected=$(find "${roots[@]}" -mindepth 1 -maxdepth 2 -type d \
+    ! -path '*/.*' ! -name node_modules ! -name venv | fzf --prompt='Project > ') || exit 0
+[[ -n $selected ]] || exit 0
+name="$(basename "$selected" | tr '.: ' '___')-$(printf '%s' "$selected" | cksum | cut -d ' ' -f 1)"
+tmux has-session -t "=$name" 2>/dev/null || tmux new-session -d -s "$name" -c "$selected"
+if [[ -n ${TMUX:-} ]]; then
+    tmux switch-client -t "=$name"
+else
+    tmux attach-session -t "=$name"
+fi

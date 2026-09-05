@@ -1,7 +1,5 @@
 #!/bin/bash
 
-scrDir="$HOME/.config/hypr/scripts"
-
 options="Shutdown\nReboot\nSuspend\nLogout"
 
 choice=$(echo -e "$options" | fuzzel --dmenu)
@@ -14,9 +12,9 @@ case "$choice" in
 	systemctl reboot
 	;;
 "Suspend")
-	systemctl suspend
+	"$HOME/Scripts/lock-session" suspend
 	;;
 "Logout")
-	loginctl terminate-user $USER
+	swaymsg exit
 	;;
 esac

@@ -7,3 +7,8 @@ LICENSE
 assets
 \.codex
 Scripts/\.codex
+manifests
+packages
+docs
+install
+system

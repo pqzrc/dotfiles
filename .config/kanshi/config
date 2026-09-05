@@ -1,12 +1,3 @@
-# swaymsg -t get_outputs  →  check output names & modes
-# kanshictl switch <name>  →  switch to a profile by name
-
-profile laptop-only {
-    output eDP-1 enable mode 1366x768@60Hz
-}
-
-profile laptop-left {
-    output eDP-1 enable mode 1366x768@60.003Hz position 0,0
-    output HDMI-A-1 enable mode 1920x1080@100Hz position 1366,0
-}
-
+# All profiles match only their connected outputs. The first match wins.
+include ~/.config/rice/hosts/laptop/kanshi.conf
+include ~/.config/rice/hosts/desktop/kanshi.conf

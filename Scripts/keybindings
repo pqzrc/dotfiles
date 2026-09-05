@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Display active Sway bindings in a searchable, read-only Fuzzel menu."""
+import argparse
+import json
+import re
+import subprocess
+
+
+def bindings(config):
+    variables = dict(re.findall(r'^set\s+(\$\w+)\s+(.+)$', config, re.MULTILINE))
+    mode = 'default'
+    rows = []
+    for raw in config.splitlines():
+        line = raw.strip()
+        match = re.match(r'mode\s+"([^"]+)"\s*\{', line)
+        if match:
+            mode = match[1]
+            continue
+        if line == '}':
+            mode = 'default'
+        match = re.match(r'(bindsym|bindcode)\s+((?:--\S+\s+)*)(\S+)\s+(.+)', line)
+        if not match:
+            continue
+        kind, flags, key, action = match.groups()
+        key = re.sub(r'\$\w+', lambda m: variables.get(m[0], m[0]), key)
+        action = re.sub(r'\$\w+', lambda m: variables.get(m[0], m[0]), action)
+        if kind == 'bindcode':
+            parts = key.split('+')
+            if parts[-1].isdigit() and 10 <= int(parts[-1]) <= 19:
+                parts[-1] = str((int(parts[-1]) - 9) % 10) + ' [number row]'
+            else:
+                parts[-1] = 'keycode ' + parts[-1]
+            key = '+'.join(parts)
+        key = key.replace('Mod4', 'Super').replace('Return', 'Enter').replace('BackSpace', 'Backspace')
+        action = re.sub(r'^exec\s+(?:--no-startup-id\s+)?', '', action)
+        prefix = '' if mode == 'default' else f'[{mode}] '
+        suffix = ' [on release]' if '--release' in flags else ''
+        rows.append(f'{prefix}{key}{suffix}  ->  {action}')
+    return sorted(rows, key=str.casefold)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--list', action='store_true', help='Print without opening the menu')
+    args = parser.parse_args()
+    config = json.loads(subprocess.check_output(['swaymsg', '-t', 'get_config', '-r'], text=True))['config']
+    text = '\n'.join(bindings(config)) + '\n'
+    if args.list:
+        print(text, end='')
+    else:
+        # Selection is deliberately ignored; displaying a binding never executes it.
+        subprocess.run(['fuzzel', '--dmenu', '--prompt=Keybindings > ', '--width=100', '--lines=24'], input=text, text=True, stdout=subprocess.DEVNULL, check=False)
+
+
+if __name__ == '__main__':
+    main()

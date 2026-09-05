@@ -5,8 +5,7 @@
   "spacing": 0,
   "height": 28,
   "modules-left": [
-    "sway/workspaces",
-    "niri/workspaces"
+    "sway/workspaces"
   ],
   "modules-center": [
     "mpris"
@@ -54,13 +53,13 @@
     "on-click": "activate"
   },
   "cpu": {
-    "interval": 2,
+    "interval": 5,
     "format": "cpu {usage}%",
     "on-click": "ghostty -e btop"
   },
   "memory": {
     "format": "mem {used:0.1f}gb",
-    "interval": 2,
+    "interval": 5,
     "on-click": "ghostty -e btop"
   },
   "disk": {
@@ -76,7 +75,6 @@
     "tooltip": false
   },
   "network": {
-    "interface": "wlan*",
     "format-wifi": "wifi {essid}",
     "format-ethernet": "eth {ifname}",
     "format-disconnected": "wifi --",

@@ -9,7 +9,8 @@ exec kanshi
 exec_always kanshictl reload
 exec --no-startup-id autotiling
 exec waybar
-exec mako
+exec dunst
+exec ~/Scripts/start-idle
 exec ~/Scripts/battery-monitor
 exec_always ~/Scripts/set-wallpaper random --quiet
 
@@ -31,9 +32,7 @@ set $menu fuzzel
 # Run: swaymsg -t get_outputs
 output * bg #1f2430 solid_color
 
-# Home desktop monitor. Ignored on machines where DP-1 does not exist.
-output DP-1 mode 2560x1440@239.972Hz
-output HDMI-A-1 mode 1920x1080@60Hz
+# Monitor modes and positions are owned by Kanshi's host profiles.
 # Laptop/work fallback order:
 # - laptop only: all workspaces fall back to eDP-1
 # - laptop + external: workspaces 4-10 prefer HDMI-A-1
@@ -59,11 +58,7 @@ input * {
     repeat_rate 60
 }
 
-# Lock after 300s (5min), turn off monitors after 600s (10min), lock before sleep
-# exec swayidle -w \
-#     timeout 300 'swaylock -f' \
-#     timeout 600 'swaymsg "output * power off"' resume 'swaymsg "output * power on"' \
-#     before-sleep 'swaylock -f'
+# Idle locking and pre-suspend locking use ~/.config/swayidle/config.
 
 
 # Basic touchpad settings
@@ -98,7 +93,6 @@ titlebar_padding 1
 hide_edge_borders --i3 smart
 
 workspace_auto_back_and_forth no
-focus_on_window_activation focus
 floating_modifier $mod normal
 focus_on_window_activation urgent
 focus_wrapping no
@@ -120,7 +114,7 @@ assign [class="zen"] workspace number 2
 assign [app_id="vesktop"] workspace number 3
 assign [class="Vesktop"] workspace number 3
 assign [app_id="org.telegram.desktop"] workspace number 3
-assign [app_id="obsidian"] workspace number 3
+assign [app_id="obsidian"] workspace number 5
 assign [app_id="sh.cider.genten"] workspace number 4
 assign [app_id="mpv"] workspace number 4
 
@@ -148,6 +142,7 @@ for_window [app_id="satty"] floating enable, resize set width 1000 height 600, m
 # │ KEYBINDINGS                                                           │
 # ╰───────────────────────────────────────────────────────────────────────╯
 # ─── Core Applications ───
+bindsym $mod+F1 exec ~/Scripts/keybindings
 bindsym $mod+Return exec $term
 bindsym $mod+d exec $menu
 #bindsym $mod+b exec zen-browser
@@ -169,7 +164,7 @@ bindsym Alt+I exec ghostty --class=com.vyrx.kanshi-switch -e ~/Scripts/kanshi-sw
 # bindsym $mod+Shift+Return exec ghostty -e tmux a 
 bindsym $mod+Shift+BackSpace exec ~/Scripts/run-scrcpy mirror
 
-bindsym --locked XF86PowerOff exec systemctl suspend | swaylock
+# systemd-logind handles the power key; swayidle locks before sleep.
 
 
 # ─── Utilities ───
@@ -179,10 +174,10 @@ bindsym Alt+period exec ~/Scripts/fuzzel-emoji
 bindsym Alt+P exec hyprpicker -a
 bindsym $mod+BackSpace exec ~/Scripts/toggle-terminal-transparency
 bindsym $mod+Shift+Space exec ~/Scripts/toggle-waybar
-bindsym $mod+Shift+M exec ~/Scripts/beats
+bindsym $mod+Shift+M exec ghostty -e rmpc
 bindsym $mod+XF86AudioMute exec ~/Scripts/audio-switch
-bindsym $mod+Shift+n exec makoctl dismiss -a
-bindsym $mod+n exec makoctl restore
+bindsym $mod+Shift+n exec dunstctl close-all
+bindsym $mod+n exec dunstctl history-pop
 bindsym $mod+Alt+n exec ~/Scripts/toggle-wlsunset
 # Recording: quick toggles plus a capture/compression palette.
 bindsym $mod+R exec ~/Scripts/screenrecord --with-desktop-audio 
@@ -198,7 +193,7 @@ bindsym Ctrl+Alt+Space exec ~/Scripts/set-wallpaper choose
 bindsym Ctrl+Alt+Return exec ~/Scripts/set-wallpaper-new 
 
 # ─── Session & Power ───
-bindsym $mod+Alt+l exec swaylock
+bindsym $mod+Alt+l exec ~/Scripts/lock-session
 bindsym $mod+escape exec ~/Scripts/powermenu
 bindsym $mod+Shift+c reload
 bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway?' -B 'Yes' 'swaymsg exit'

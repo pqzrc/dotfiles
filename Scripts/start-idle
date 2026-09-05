@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+command -v swayidle >/dev/null || exit 1
+command -v swaylock >/dev/null || exit 1
+pgrep -u "$UID" -x swayidle >/dev/null && exit 0
+exec swayidle -w -C "${XDG_CONFIG_HOME:-$HOME/.config}/swayidle/config"

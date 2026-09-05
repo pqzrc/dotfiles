@@ -19,12 +19,12 @@ export MANPAGER="nvim +Man!"
 export MPD_HOST="/run/user/$(id -u)/mpd/socket"
 
 # PATH
-path=(
-  "$HOME/.local/bin"
-  "$HOME/dev-tools/flutter/bin"
-  "$HOME/.pub-cache/bin"
-  $path
-)
+#path=(
+ # "$HOME/.local/bin"
+  #"$HOME/dev-tools/flutter/bin"
+  #"$HOME/.pub-cache/bin"
+  #$path
+#)
 typeset -U path
 
 # Tools
@@ -47,7 +47,7 @@ fi
 
 # Functions
 sessionizer() {
-  "$HOME/Scripts/sessionX"
+  "$HOME/Scripts/sessionizer"
 }
 
 y() {
@@ -172,3 +172,6 @@ alias tmuxk='tmux kill-session'
 # Misc
 alias chx='chmod +x'
 alias x='exit'
+
+# Pi
+export PATH="$HOME/.npm-global/bin:$PATH"

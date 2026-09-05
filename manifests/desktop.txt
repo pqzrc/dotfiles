@@ -1,0 +1,20 @@
+# Required packages for the common Sway session.
+sway
+swaybg
+swayidle
+swaylock
+kanshi
+waybar
+dunst
+fuzzel
+kitty
+ghostty
+zsh
+starship
+fzf
+zoxide
+tmux
+stow
+git
+libnotify
+ttf-dejavu
