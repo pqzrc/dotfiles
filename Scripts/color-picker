@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+notify() {
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "color-picker" "$@"
+  fi
+}
+
+require() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'color-picker: missing dependency: %s\n' "$1" >&2
+    notify "Color picker failed" "Missing dependency: $1"
+    exit 127
+  fi
+}
+
+require grim
+require slurp
+require wl-copy
+
+if command -v magick >/dev/null 2>&1; then
+  imagemagick=(magick)
+elif command -v convert >/dev/null 2>&1; then
+  imagemagick=(convert)
+else
+  printf 'color-picker: missing dependency: magick or convert\n' >&2
+  notify "Color picker failed" "Missing dependency: ImageMagick"
+  exit 127
+fi
+
+point="$(slurp -p -f '%x,%y' 2>/dev/null || true)"
+if [[ -z "$point" ]]; then
+  exit 1
+fi
+
+color="$(
+  grim -g "${point} 1x1" -t png - \
+    | "${imagemagick[@]}" - -alpha off -depth 8 -format '#%[hex:p{0,0}]' info:-
+)"
+color="${color,,}"
+
+wl-copy --type text/plain "$color"
+wl-copy --primary --type text/plain "$color"
+
+if command -v wl-paste >/dev/null 2>&1; then
+  copied="$(wl-paste --no-newline 2>/dev/null || true)"
+  if [[ "$copied" != "$color" ]]; then
+    printf 'color-picker: clipboard verification failed\n' >&2
+    notify "Color picker failed" "Clipboard verification failed"
+    exit 1
+  fi
+fi
+
+printf '%s\n' "$color"
+notify "Color copied" "$color"

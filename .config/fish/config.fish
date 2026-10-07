@@ -26,3 +26,7 @@ starship init fish | source
 
 # Aliases
 source ~/.config/fish/aliases.fish
+
+
+# Added by Antigravity CLI installer
+set -gx PATH "/home/dnd/.local/bin" $PATH

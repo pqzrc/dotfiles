@@ -1,6 +1,6 @@
-# Sway Configuration
+#Sway Configuration
 # man 5 sway
-
+xwayland enable
 
 # ╭───────────────────────────────────────────────────────────────────────╮
 # │ STARTUP                                                               │
@@ -81,13 +81,16 @@ input type:pointer {
 # Border colors: black-metal theme
 client.focused #718096 #404552 #f7fafc #718096 #718096
 
-gaps inner 1
-smart_gaps on
+gaps inner 10
+smart_gaps off
+gaps bottom 5
+gaps top 5
 default_border pixel 1
 default_floating_border pixel 1
 
 # font pango:monospace 0.1
-font pango:DejaVu Sans Mono 9
+#font pango:DejaVu Sans Mono 9
+font pango:JetBrains Mono 10
 titlebar_border_thickness 0
 titlebar_padding 1
 hide_edge_borders --i3 smart
@@ -171,7 +174,7 @@ bindsym $mod+Shift+BackSpace exec ~/Scripts/run-scrcpy mirror
 bindsym $mod+Alt+m exec ~/Scripts/dual-dac
 bindsym Alt+comma exec cliphist list | fuzzel --dmenu | cliphist decode | wl-copy
 bindsym Alt+period exec ~/Scripts/fuzzel-emoji
-bindsym Alt+P exec hyprpicker -a
+bindsym Alt+P exec ~/Scripts/color-picker
 bindsym $mod+BackSpace exec ~/Scripts/toggle-terminal-transparency
 bindsym $mod+Shift+Space exec ~/Scripts/toggle-waybar
 bindsym $mod+Shift+M exec ghostty -e rmpc

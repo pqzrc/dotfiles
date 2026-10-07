@@ -2,8 +2,10 @@
 
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 export ZDOTDIR="${ZDOTDIR:-$XDG_CONFIG_HOME/zsh}"
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 
 if ! source $ZDOTDIR/.zshenv; then
     echo "FATAL Error: Could not source $ZDOTDIR/.zshenv"
     return 1
 fi
+
