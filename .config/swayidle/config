@@ -1,10 +1,10 @@
 # swayidle configuration file
 # Idle timeout events for Sway
 
-# Lock screen after 5 minutes (300 seconds) of inactivity
-timeout 300 '~/Scripts/lock-session'
+# Lock screen after x minutes  of inactivity
+timeout 600 '~/Scripts/lock-session'
 
-# Screen off after 5.5 minutes (330 seconds) of inactivity
+# Screen off after X  minutes  of inactivity
 timeout 600 'swaymsg "output * power off"' resume 'swaymsg "output * power on"'
 
 # Lock session before sleep

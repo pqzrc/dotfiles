@@ -31,6 +31,9 @@
   "icon_theme": "Catppuccin Latte",
   "show_edit_predictions": false,
   "languages": {
+    "LaTeX": {
+      "format_on_save": "off"
+    },
     "YAML": {
       "show_edit_predictions": false,
     },
@@ -42,7 +45,7 @@
       "model": "GPT-5.5",
     },
   },
-  "theme": "Zedokai Darker (Filter Spectrum)",
+  "theme": "Zedokai Darker Classic",
   "telemetry": {
     "diagnostics": false,
     "metrics": false,
