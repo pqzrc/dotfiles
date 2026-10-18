@@ -19,14 +19,6 @@ export MANPAGER="nvim +Man!"
 export MPD_HOST="/run/user/$(id -u)/mpd/socket"
 
 # PATH
-<<<<<<< Updated upstream
-#path=(
- # "$HOME/.local/bin"
-  #"$HOME/dev-tools/flutter/bin"
-  #"$HOME/.pub-cache/bin"
-  #$path
-#)
-=======
 path=(
   "$HOME/.local/bin"
   "$HOME/.bun/bin"
@@ -34,7 +26,6 @@ path=(
   "$HOME/.pub-cache/bin"
   $path
 )
->>>>>>> Stashed changes
 typeset -U path
 
 # Tools
@@ -183,10 +174,8 @@ alias tmuxk='tmux kill-session'
 alias chx='chmod +x'
 alias x='exit'
 
-<<<<<<< Updated upstream
 # Pi
 export PATH="$HOME/.npm-global/bin:$PATH"
-=======
 # Claude Code with GPT-5.6 Sol via CLIProxyAPI (localhost:8317)
 alias claudex='ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
   ANTHROPIC_AUTH_TOKEN=sk-dummy \
@@ -195,7 +184,6 @@ alias claudex='ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
   CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3 \
   ENABLE_TOOL_SEARCH=false \
   claude --model gpt-5.6-sol'
->>>>>>> Stashed changes
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm

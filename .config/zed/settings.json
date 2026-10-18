@@ -66,6 +66,7 @@
   },
   "toolbar": {
     // Whether to show breadcrumbs.
+    "code_actions": false,
     "breadcrumbs": true,
     // Whether to show quick action buttons.
     "quick_actions": false,
@@ -117,4 +118,5 @@
     "jsxSingleQuote": true,
     "singleQuote": true,
   },
+  
 }

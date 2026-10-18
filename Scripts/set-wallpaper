@@ -22,12 +22,27 @@ set_wallpaper() {
 }
 
 choose_with_yazi() {
-	local chooser_file
+	local chooser_file yazi_config
 	chooser_file=$(mktemp)
+	yazi_config=$(mktemp -d)
 
-	yazi --chooser-file "$chooser_file" "$WALLPAPER_DIR"
+	cat >"$yazi_config/yazi.toml" <<'EOF'
+[manager]
+show_hidden = false
+sort_by = "natural"
+
+[preview]
+image_delay = 0
+image_filter = "lanczos3"
+image_quality = 90
+max_width = 1920
+max_height = 1080
+EOF
+
+	YAZI_CONFIG_HOME="$yazi_config" yazi --chooser-file "$chooser_file" "$WALLPAPER_DIR"
 	wallpaper=$(head -n 1 "$chooser_file")
 	rm -f "$chooser_file"
+	rm -rf "$yazi_config"
 
 	[[ -z "$wallpaper" ]] && exit 0
 	set_wallpaper "$wallpaper"
@@ -41,6 +56,21 @@ random)
 	;;
 choose)
 	[[ ! -d "$WALLPAPER_DIR" ]] && exit 0
+	if command -v rofi >/dev/null; then
+		mapfile -d '' -t wallpapers < <(find "$WALLPAPER_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) -print0 | sort -z)
+		[[ ${#wallpapers[@]} -eq 0 ]] && exit 0
+		selection=$(
+			for wallpaper in "${wallpapers[@]}"; do
+				name=$(basename "$wallpaper")
+				name=${name//$'\n'/ }
+				printf '%s\0icon\x1f%s\n' "$name" "$wallpaper"
+			done | rofi -dmenu -no-config -show-icons -p Wallpaper -format i \
+				-theme "$(dirname "$(readlink -f "$0")")/wallpaper-picker.rasi"
+		) || exit 0
+		[[ "$selection" =~ ^[0-9]+$ ]] || exit 0
+		set_wallpaper "${wallpapers[$selection]}"
+		exit 0
+	fi
 	if command -v yazi >/dev/null && command -v kitty >/dev/null && [[ ! -t 0 ]]; then
 		kitty -e "$0" choose-yazi
 		exit 0

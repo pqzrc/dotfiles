@@ -192,7 +192,7 @@ bindsym Print exec ~/Scripts/screenshot fullscreen
 
 
 # ─── Wallpaper ───
-bindsym Ctrl+Alt+Space exec ~/Scripts/set-wallpaper choose
+bindsym Ctrl+Alt+Space exec /home/dnd/Scripts/set-wallpaper choose
 bindsym Ctrl+Alt+Return exec ~/Scripts/set-wallpaper-new 
 
 # ─── Session & Power ───
