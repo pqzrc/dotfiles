@@ -172,6 +172,7 @@ bindsym $mod+Shift+BackSpace exec ~/Scripts/run-scrcpy mirror
 
 # ─── Utilities ───
 bindsym $mod+Alt+m exec ~/Scripts/dual-dac
+bindsym $mod+Shift+b exec ~/Scripts/airpods popup
 bindsym Alt+comma exec cliphist list | fuzzel --dmenu | cliphist decode | wl-copy
 bindsym Alt+period exec ~/Scripts/fuzzel-emoji
 bindsym Alt+P exec ~/Scripts/color-picker

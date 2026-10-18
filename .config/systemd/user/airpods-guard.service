@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep AirPods disconnected until explicitly requested
+
+[Service]
+Type=simple
+ExecStart=%h/Scripts/airpods guard
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

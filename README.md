@@ -75,6 +75,12 @@ Each new lock selects a random JPG, PNG, or WebP from `~/Pictures/Wallpapers` (i
 
 The physical power key is handled by systemd-logind, not a Sway binding. Run `sudo bash install/power-policy.sh` once per machine to install `HandlePowerKey=suspend` and reload logind without ending the session. The active swayidle process locks before sleep. A Sway binding alone does not override logind's default power-off action.
 
+## AirPods
+
+Waybar has a dedicated AirPods Pro item. Left-click opens a native control panel, right-click connects or disconnects, and `Super+Shift+B` opens the panel from Sway. Connecting makes the AirPods the default PipeWire output and moves active audio; disconnecting restores the previous output. A user service then blocks the AirPods so the computer cannot silently reclaim them from another device.
+
+Setup, pairing, and limitations are documented in [`docs/airpods.md`](docs/airpods.md).
+
 ## Screen recording
 
 Install the Arch Linux packages used by the Sway recording and Discord

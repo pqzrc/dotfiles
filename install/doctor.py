@@ -9,7 +9,7 @@ import sys
 
 repo = Path(__file__).resolve().parents[1]
 errors = []
-for command in ('sway', 'swaylock', 'swayidle', 'kanshi', 'waybar', 'dunst', 'dunstctl', 'fuzzel', 'kitty', 'ghostty', 'zsh', 'fzf', 'zoxide', 'starship', 'tmux', 'notify-send', 'flock'):
+for command in ('sway', 'swaylock', 'swayidle', 'kanshi', 'waybar', 'bluetoothctl', 'blueman-manager', 'dunst', 'dunstctl', 'fuzzel', 'kitty', 'ghostty', 'zsh', 'fzf', 'zoxide', 'starship', 'tmux', 'notify-send', 'flock'):
     if not shutil.which(command):
         errors.append(f'Missing command: {command}')
 for config in (repo / '.config/sway/config', repo / '.config/waybar/config.jsonc', repo / '.config/swayidle/config'):
@@ -21,6 +21,11 @@ for script in ('lock-session', 'start-idle', 'sessionizer', 'powermenu', 'batter
     result = subprocess.run(['bash', '-n', str(repo / 'Scripts' / script)], capture_output=True, text=True)
     if result.returncode:
         errors.append(result.stderr)
+for script in ('airpods',):
+    try:
+        compile((repo / 'Scripts' / script).read_text(), str(repo / 'Scripts' / script), 'exec')
+    except SyntaxError as error:
+        errors.append(str(error))
 json.loads((repo / '.config/waybar/config.jsonc').read_text())
 for directory in ('sway', 'swayidle', 'swaylock', 'kanshi', 'rice'):
     target = Path.home() / '.config' / directory

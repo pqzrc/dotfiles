@@ -11,6 +11,7 @@
 @define-color waybar-workspace-active-bg #333333;
 @define-color waybar-workspace-occupied-fg #a0a0a0;
 @define-color waybar-workspace-empty-fg #505050;
+@define-color airpods-connected #0a84ff;
 
 * {
   background-color: transparent;
@@ -53,7 +54,7 @@ window#waybar {
   background-color: transparent;
   color: @waybar-workspace-empty-fg;
   font-weight: 400;
-  transition: all 100ms ease;
+  transition: background-color 100ms ease, color 100ms ease, opacity 100ms ease;
   border-radius: 0;
   border: none;
 }
@@ -87,6 +88,7 @@ window#waybar {
 #tray,
 #custom-screenrecording-indicator,
 #custom-expand,
+#custom-airpods,
 #mpris,
 #clock,
 #custom-idle-indicator,
@@ -114,6 +116,24 @@ window#waybar {
   color: @waybar-danger;
 }
 
+#custom-airpods {
+  font-weight: 600;
+  transition: color 150ms ease, opacity 150ms ease;
+}
+
+#custom-airpods.connected {
+  color: @airpods-connected;
+}
+
+#custom-airpods.disconnected {
+  opacity: 0.65;
+}
+
+#custom-airpods.off,
+#custom-airpods.missing {
+  opacity: 0.4;
+}
+
 #bluetooth,
 #battery.warning {
   color: @waybar-warning;
@@ -128,6 +148,7 @@ window#waybar {
 #memory,
 #network,
 #pulseaudio,
+#custom-airpods,
 #battery,
 #clock {
   margin: 0 1px;

@@ -1,0 +1,1007 @@
+#!/usr/bin/env python3
+"""AirPods controls for Waybar and a small Sway-native popup."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from typing import Any, Iterator
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+APP_ID = "com.dnd.AirPods"
+BLUEZ = "org.bluez"
+DEVICE_INTERFACE = "org.bluez.Device1"
+ADAPTER_INTERFACE = "org.bluez.Adapter1"
+BATTERY_INTERFACE = "org.bluez.Battery1"
+PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
+OBJECT_MANAGER_INTERFACE = "org.freedesktop.DBus.ObjectManager"
+AIRPODS_MATCH = os.environ.get("AIRPODS_MATCH", "AirPods").casefold()
+AIRPODS_ADDRESS = os.environ.get("AIRPODS_ADDRESS", "").upper()
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ASSET_DIR = REPO_ROOT / ".config" / "airpods" / "assets"
+PRODUCT_IMAGE = ASSET_DIR / "airpods-pro.jpg"
+
+
+class AirPodsError(RuntimeError):
+    pass
+
+
+class Bluez:
+    def __init__(self) -> None:
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error as error:
+            raise AirPodsError("The system D-Bus is unavailable.") from error
+
+    def managed_objects(self) -> dict[str, dict[str, dict[str, Any]]]:
+        try:
+            result = self.bus.call_sync(
+                BLUEZ,
+                "/",
+                OBJECT_MANAGER_INTERFACE,
+                "GetManagedObjects",
+                None,
+                GLib.VariantType.new("(a{oa{sa{sv}}})"),
+                Gio.DBusCallFlags.NONE,
+                3000,
+                None,
+            )
+        except GLib.Error as error:
+            raise AirPodsError("Bluetooth is not running.") from error
+        return result.unpack()[0]
+
+    @staticmethod
+    def _is_airpods(properties: dict[str, Any]) -> bool:
+        address = str(properties.get("Address", "")).upper()
+        if AIRPODS_ADDRESS:
+            return address == AIRPODS_ADDRESS
+        searchable = " ".join(
+            str(properties.get(field, "")) for field in ("Alias", "Name")
+        ).casefold()
+        return AIRPODS_MATCH in searchable
+
+    def snapshot(self) -> dict[str, Any]:
+        objects = self.managed_objects()
+        device_path = ""
+        device: dict[str, Any] = {}
+
+        for path, interfaces in objects.items():
+            candidate = interfaces.get(DEVICE_INTERFACE)
+            if candidate and self._is_airpods(candidate):
+                device_path = path
+                device = candidate
+                break
+
+        adapter_path = str(device.get("Adapter", ""))
+        if not adapter_path:
+            adapter_path = next(
+                (
+                    path
+                    for path, interfaces in objects.items()
+                    if ADAPTER_INTERFACE in interfaces
+                ),
+                "",
+            )
+        adapter = objects.get(adapter_path, {}).get(ADAPTER_INTERFACE, {})
+        battery = objects.get(device_path, {}).get(BATTERY_INTERFACE, {}).get(
+            "Percentage"
+        )
+
+        return {
+            "available": bool(device),
+            "path": device_path,
+            "adapter_path": adapter_path,
+            "name": str(device.get("Alias") or device.get("Name") or "AirPods"),
+            "address": str(device.get("Address", "")),
+            "paired": bool(device.get("Paired", False)),
+            "connected": bool(device.get("Connected", False)),
+            "blocked": bool(device.get("Blocked", False)),
+            "powered": bool(adapter.get("Powered", False)),
+            "battery": int(battery) if battery is not None else None,
+        }
+
+    def _call(self, path: str, interface: str, method: str, timeout: int) -> None:
+        try:
+            self.bus.call_sync(
+                BLUEZ,
+                path,
+                interface,
+                method,
+                None,
+                None,
+                Gio.DBusCallFlags.NONE,
+                timeout,
+                None,
+            )
+        except GLib.Error as error:
+            raise AirPodsError(friendly_error(str(error))) from error
+
+    def _set_bool(self, path: str, interface: str, property_name: str, value: bool) -> None:
+        try:
+            self.bus.call_sync(
+                BLUEZ,
+                path,
+                PROPERTIES_INTERFACE,
+                "Set",
+                GLib.Variant(
+                    "(ssv)",
+                    (interface, property_name, GLib.Variant("b", value)),
+                ),
+                None,
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+            )
+        except GLib.Error as error:
+            raise AirPodsError(friendly_error(str(error))) from error
+
+    def connect_device(self) -> None:
+        state = self.snapshot()
+        if not state["available"]:
+            raise AirPodsError("Pair the AirPods in Bluetooth Settings first.")
+        if state["connected"]:
+            return
+        if not state["powered"]:
+            if not state["adapter_path"]:
+                raise AirPodsError("No Bluetooth controller was found.")
+            self._set_bool(
+                state["adapter_path"], ADAPTER_INTERFACE, "Powered", True
+            )
+        if state["blocked"]:
+            self._set_bool(state["path"], DEVICE_INTERFACE, "Blocked", False)
+        self._call(state["path"], DEVICE_INTERFACE, "Connect", 25000)
+
+    def disconnect_device(self) -> None:
+        state = self.snapshot()
+        if not state["available"]:
+            raise AirPodsError("Pair the AirPods in Bluetooth Settings first.")
+        if state["connected"]:
+            self._call(state["path"], DEVICE_INTERFACE, "Disconnect", 10000)
+        latest = self.snapshot()
+        if latest["available"] and not latest["blocked"]:
+            self._set_bool(latest["path"], DEVICE_INTERFACE, "Blocked", True)
+
+    def block_if_disconnected(self) -> bool:
+        state = self.snapshot()
+        if not state["available"] or state["connected"] or state["blocked"]:
+            return False
+        self._set_bool(state["path"], DEVICE_INTERFACE, "Blocked", True)
+        return True
+
+
+class AudioRouter:
+    def __init__(self) -> None:
+        state_home = Path(
+            os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")
+        )
+        self.state_dir = state_home / "airpods"
+        self.state_file = self.state_dir / "audio-route.json"
+        self.lock_file = self.state_dir / "audio-route.lock"
+
+    @contextmanager
+    def _state_lock(self) -> Iterator[None]:
+        import fcntl
+
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with self.lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    @staticmethod
+    def _pactl(arguments: list[str], timeout: float = 5) -> subprocess.CompletedProcess[str]:
+        if not shutil.which("pactl"):
+            raise AirPodsError("pactl is missing. Install pipewire-pulse.")
+        try:
+            result = subprocess.run(
+                ["pactl", *arguments],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise AirPodsError("PipeWire did not answer in time.") from error
+        if result.returncode:
+            detail = result.stderr.strip() or "unknown error"
+            raise AirPodsError(f"PipeWire could not switch outputs: {detail}")
+        return result
+
+    def _pactl_json(self, object_type: str) -> list[dict[str, Any]]:
+        result = self._pactl(["-f", "json", "list", object_type])
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise AirPodsError("PipeWire returned invalid device information.") from error
+        return value if isinstance(value, list) else []
+
+    def sinks(self) -> list[dict[str, Any]]:
+        return self._pactl_json("sinks")
+
+    def default_sink(self) -> str:
+        return self._pactl(["get-default-sink"]).stdout.strip()
+
+    @staticmethod
+    def _normalized_address(address: str) -> str:
+        return address.upper().replace("-", ":").replace("_", ":")
+
+    def is_airpods_sink(self, sink: dict[str, Any], state: dict[str, Any]) -> bool:
+        properties = sink.get("properties") or {}
+        expected_address = self._normalized_address(str(state.get("address", "")))
+        sink_address = self._normalized_address(
+            str(properties.get("api.bluez5.address", ""))
+        )
+        if expected_address and sink_address == expected_address:
+            return True
+        expected_token = expected_address.replace(":", "_")
+        sink_name = str(sink.get("name", ""))
+        if expected_token and expected_token in sink_name.upper():
+            return True
+        searchable = " ".join(
+            (
+                sink_name,
+                str(sink.get("description", "")),
+                str(properties.get("device.description", "")),
+                str(properties.get("device.alias", "")),
+            )
+        ).casefold()
+        return properties.get("device.bus") == "bluetooth" and "airpods" in searchable
+
+    def _read_route(self) -> dict[str, Any]:
+        with self._state_lock():
+            try:
+                value = json.loads(self.state_file.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                return {}
+        return value if isinstance(value, dict) else {}
+
+    def _write_route(self, route: dict[str, Any]) -> None:
+        with self._state_lock():
+            if self.state_file.exists():
+                return
+            temporary = self.state_file.with_suffix(f".{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(route) + "\n")
+            temporary.chmod(0o600)
+            temporary.replace(self.state_file)
+
+    def _clear_route(self) -> None:
+        with self._state_lock():
+            self.state_file.unlink(missing_ok=True)
+
+    def remember_previous(self, state: dict[str, Any]) -> None:
+        if self._read_route():
+            return
+        current = self.default_sink()
+        current_sink = next(
+            (sink for sink in self.sinks() if sink.get("name") == current), None
+        )
+        if current_sink and self.is_airpods_sink(current_sink, state):
+            return
+        if current:
+            self._write_route(
+                {
+                    "previous_sink": current,
+                    "airpods_address": state.get("address", ""),
+                }
+            )
+
+    def _airpods_sink(
+        self, sinks: list[dict[str, Any]], state: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return next(
+            (sink for sink in sinks if self.is_airpods_sink(sink, state)), None
+        )
+
+    @staticmethod
+    def _available(sink: dict[str, Any]) -> bool:
+        active_port = sink.get("active_port")
+        ports = sink.get("ports") or []
+        port = next((item for item in ports if item.get("name") == active_port), {})
+        return port.get("availability") != "not available"
+
+    def _fallback_sink(
+        self, sinks: list[dict[str, Any]], state: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        candidates = [
+            sink
+            for sink in sinks
+            if not self.is_airpods_sink(sink, state) and self._available(sink)
+        ]
+
+        def score(sink: dict[str, Any]) -> int:
+            searchable = " ".join(
+                (str(sink.get("name", "")), str(sink.get("description", "")))
+            ).casefold()
+            return (
+                (200 if sink.get("state") == "RUNNING" else 0)
+                + (40 if "speaker" in searchable else 0)
+                + (20 if "analog" in searchable else 0)
+            )
+
+        return max(candidates, key=score, default=None)
+
+    def _set_default_and_move_streams(self, sink_name: str) -> None:
+        self._pactl(["set-default-sink", sink_name])
+        for stream in self._pactl_json("sink-inputs"):
+            properties = stream.get("properties") or {}
+            if properties.get("media.class") != "Stream/Output/Audio":
+                continue
+            stream_index = stream.get("index")
+            if stream_index is None:
+                continue
+            subprocess.run(
+                ["pactl", "move-sink-input", str(stream_index), sink_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+
+    def activate(self, state: dict[str, Any]) -> str:
+        self.remember_previous(state)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            sink = self._airpods_sink(self.sinks(), state)
+            if sink:
+                sink_name = str(sink["name"])
+                self._set_default_and_move_streams(sink_name)
+                return sink_name
+            time.sleep(0.25)
+        raise AirPodsError("Connected, but PipeWire did not create an AirPods output.")
+
+    def restore(self, state: dict[str, Any]) -> str | None:
+        route = self._read_route()
+        previous = str(route.get("previous_sink", ""))
+        deadline = time.monotonic() + 6
+
+        while time.monotonic() < deadline:
+            sinks = self.sinks()
+            if previous:
+                saved_sink = next(
+                    (sink for sink in sinks if sink.get("name") == previous), None
+                )
+                if saved_sink and not self.is_airpods_sink(saved_sink, state):
+                    self._set_default_and_move_streams(previous)
+                    self._clear_route()
+                    return previous
+
+            current = self.default_sink()
+            current_sink = next(
+                (sink for sink in sinks if sink.get("name") == current), None
+            )
+            if current_sink and not self.is_airpods_sink(current_sink, state):
+                if route:
+                    self._set_default_and_move_streams(current)
+                    self._clear_route()
+                return current
+
+            if not self._airpods_sink(sinks, state):
+                fallback = self._fallback_sink(sinks, state)
+                if fallback:
+                    sink_name = str(fallback["name"])
+                    self._set_default_and_move_streams(sink_name)
+                    self._clear_route()
+                    return sink_name
+            time.sleep(0.25)
+
+        if route:
+            raise AirPodsError("The previous audio output is not available.")
+        return None
+
+
+def friendly_error(message: str) -> str:
+    lowered = message.casefold()
+    if any(
+        text in lowered
+        for text in (
+            "host is down",
+            "page timeout",
+            "connection-attempt-failed",
+            "br-connection",
+        )
+    ):
+        return "Open the AirPods case and try again."
+    if "blocked" in lowered or "not ready" in lowered:
+        return "Bluetooth is blocked. Turn it on and try again."
+    if "in progress" in lowered:
+        return "A Bluetooth connection is already in progress."
+    if "not available" in lowered:
+        return "The AirPods are not available. Open the case and try again."
+    return "Bluetooth could not complete the request."
+
+
+def short_product_name(name: str) -> str:
+    for product in ("AirPods Pro", "AirPods Max", "AirPods"):
+        if product.casefold() in name.casefold():
+            return product
+    return "AirPods"
+
+
+def get_state() -> dict[str, Any]:
+    try:
+        return Bluez().snapshot()
+    except AirPodsError:
+        return {
+            "available": False,
+            "path": "",
+            "adapter_path": "",
+            "name": "AirPods",
+            "address": "",
+            "paired": False,
+            "connected": False,
+            "blocked": False,
+            "powered": False,
+            "battery": None,
+        }
+
+
+def waybar_status() -> int:
+    state = get_state()
+    if state["connected"]:
+        detail = "Connected"
+        css_class = "connected"
+        if state["battery"] is not None:
+            detail += f" · {state['battery']}%"
+            text = f"bt {state['battery']}%"
+        else:
+            text = "bt pods"
+    elif not state["available"]:
+        detail = "Not paired"
+        css_class = "missing"
+        text = "bt --"
+    elif not state["powered"]:
+        detail = "Bluetooth off"
+        css_class = "off"
+        text = "bt off"
+    else:
+        detail = "Not connected"
+        css_class = "disconnected"
+        text = "bt --"
+
+    tooltip = (
+        f"{state['name']}\n{detail}\n"
+        "Left click: open controls\nRight click: connect or disconnect"
+    )
+    print(
+        json.dumps(
+            {"text": text, "tooltip": tooltip, "class": css_class},
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def signal_waybar() -> None:
+    subprocess.run(
+        ["pkill", "-RTMIN+9", "waybar"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def send_notification(title: str, body: str) -> None:
+    if not shutil.which("notify-send"):
+        return
+    command = ["notify-send", "--app-name=AirPods", title, body]
+    if PRODUCT_IMAGE.is_file():
+        command.insert(2, f"--icon={PRODUCT_IMAGE}")
+    subprocess.run(command, check=False)
+
+
+def perform_device_action(action: str) -> dict[str, Any]:
+    bluez = Bluez()
+    audio = AudioRouter()
+    before = bluez.snapshot()
+    if action == "toggle":
+        action = "disconnect" if before["connected"] else "connect"
+
+    if action == "connect":
+        audio.remember_previous(before)
+        try:
+            bluez.connect_device()
+            state = bluez.snapshot()
+            audio.activate(state)
+        except AirPodsError:
+            audio.restore(before)
+            raise
+    elif action == "disconnect":
+        bluez.disconnect_device()
+        state = bluez.snapshot()
+        audio.restore(state)
+    else:
+        raise AirPodsError(f"Unknown action: {action}")
+    return state
+
+
+def run_action(action: str, notify: bool = False) -> int:
+    try:
+        state = perform_device_action(action)
+    except AirPodsError as error:
+        if notify:
+            send_notification("AirPods", str(error))
+        else:
+            print(str(error), file=sys.stderr)
+        signal_waybar()
+        return 1
+
+    if notify:
+        status = "Connected" if state["connected"] else "Disconnected"
+        send_notification(short_product_name(state["name"]), status)
+    signal_waybar()
+    return 0
+
+
+def run_guard() -> int:
+    try:
+        bluez = Bluez()
+        audio = AudioRouter()
+        initial_state = bluez.snapshot()
+    except AirPodsError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    loop = GLib.MainLoop()
+
+    def route_connected(state: dict[str, Any]) -> None:
+        try:
+            audio.activate(state)
+            signal_waybar()
+        except AirPodsError as error:
+            print(f"airpods guard: {error}", file=sys.stderr)
+
+    def finish_disconnect() -> None:
+        try:
+            state = bluez.snapshot()
+            audio.restore(state)
+            if bluez.block_if_disconnected():
+                signal_waybar()
+        except AirPodsError as error:
+            print(f"airpods guard: {error}", file=sys.stderr)
+
+    if initial_state["connected"]:
+        threading.Thread(
+            target=route_connected, args=(initial_state,), daemon=True
+        ).start()
+    else:
+        try:
+            audio.restore(initial_state)
+            if bluez.block_if_disconnected():
+                signal_waybar()
+        except AirPodsError as error:
+            print(f"airpods guard: {error}", file=sys.stderr)
+
+    def after_disconnect() -> bool:
+        threading.Thread(target=finish_disconnect, daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def properties_changed(
+        _connection: Gio.DBusConnection,
+        _sender: str,
+        object_path: str,
+        _interface: str,
+        _signal: str,
+        parameters: GLib.Variant,
+    ) -> None:
+        changed_interface, changed, _invalidated = parameters.unpack()
+        if changed_interface != DEVICE_INTERFACE:
+            return
+        try:
+            state = bluez.snapshot()
+        except AirPodsError:
+            return
+        if state["path"] != object_path:
+            return
+        signal_waybar()
+        if changed.get("Connected") is True:
+            threading.Thread(target=route_connected, args=(state,), daemon=True).start()
+        elif changed.get("Connected") is False:
+            GLib.timeout_add(350, after_disconnect)
+
+    bluez.bus.signal_subscribe(
+        BLUEZ,
+        PROPERTIES_INTERFACE,
+        "PropertiesChanged",
+        None,
+        DEVICE_INTERFACE,
+        Gio.DBusSignalFlags.MATCH_ARG0_NAMESPACE,
+        properties_changed,
+    )
+    loop.run()
+    return 0
+
+
+def run_popup() -> int:
+    import fcntl
+    import signal
+    from ctypes import CDLL
+
+    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    lock_file = (runtime_dir / "airpods-popup.lock").open("a+")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.seek(0)
+        try:
+            os.kill(int(lock_file.read().strip()), signal.SIGTERM)
+        except (ProcessLookupError, ValueError):
+            pass
+        return 0
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+
+    # GI loads dependencies before the requested library. Load the layer-shell
+    # shim first so GTK does not claim the Wayland symbols ahead of it.
+    CDLL("libgtk4-layer-shell.so")
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    gi.require_version("Pango", "1.0")
+    gi.require_version("Gtk4LayerShell", "1.0")
+    from gi.repository import Gtk4LayerShell
+    from gi.repository import Gdk, Gtk, Pango
+
+    css = """
+    window.airpods-popup { background: transparent; }
+    .airpods-card {
+      background: #1c1c1e;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 24px;
+      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.46);
+      padding: 10px;
+      font-family: Inter, sans-serif;
+    }
+    .hero {
+      background: #f5f5f7;
+      border-radius: 18px;
+    }
+    .device-title {
+      color: #f5f5f7;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+    .status-label {
+      color: #98989d;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .status-dot { font-size: 12px; }
+    .status-dot.connected { color: #30d158; }
+    .status-dot.disconnected { color: #8e8e93; }
+    .status-dot.warning { color: #ff9f0a; }
+    .battery {
+      color: #f5f5f7;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 9px 12px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .battery-value { font-variant-numeric: tabular-nums; }
+    .airpods-action {
+      min-height: 44px;
+      color: white;
+      background: #0a84ff;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 700;
+      box-shadow: none;
+      transition: background-color 120ms ease-out;
+    }
+    .airpods-action:hover { background: #2692ff; }
+    .airpods-action:active { background: #0071e3; }
+    .airpods-action.disconnect {
+      color: #ff6961;
+      background: rgba(255, 69, 58, 0.13);
+    }
+    .airpods-action.disconnect:hover { background: rgba(255, 69, 58, 0.20); }
+    .icon-button {
+      min-width: 40px;
+      min-height: 40px;
+      padding: 0;
+      color: #aeaeb2;
+      background: transparent;
+      border-radius: 20px;
+      box-shadow: none;
+    }
+    .icon-button:hover { color: #f5f5f7; background: rgba(255, 255, 255, 0.08); }
+    .error-label {
+      color: #ff9f0a;
+      font-size: 12px;
+    }
+    .hint {
+      color: #636366;
+      font-size: 11px;
+    }
+    """
+
+    class AirPodsPopup(Gtk.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id=APP_ID)
+            self.window: Gtk.ApplicationWindow | None = None
+            self.action_button: Gtk.Button | None = None
+            self.title_label: Gtk.Label | None = None
+            self.status_label: Gtk.Label | None = None
+            self.status_dot: Gtk.Label | None = None
+            self.battery_box: Gtk.Box | None = None
+            self.battery_value: Gtk.Label | None = None
+            self.error_label: Gtk.Label | None = None
+            self.busy = False
+
+        def do_startup(self) -> None:
+            Gtk.Application.do_startup(self)
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css)
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(),
+                provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+        def do_activate(self) -> None:
+            if self.window is not None:
+                self.window.close()
+                return
+            self.build_window()
+            self.refresh()
+            GLib.timeout_add_seconds(1, self.refresh)
+            self.window.present()
+
+        def build_window(self) -> None:
+            window = Gtk.ApplicationWindow(application=self)
+            window.set_title("AirPods")
+            window.set_decorated(False)
+            window.set_resizable(False)
+            window.set_default_size(360, -1)
+            window.add_css_class("airpods-popup")
+            window.connect("close-request", self.on_close)
+            self.window = window
+
+            Gtk4LayerShell.init_for_window(window)
+            Gtk4LayerShell.set_namespace(window, "airpods-popup")
+            Gtk4LayerShell.set_layer(window, Gtk4LayerShell.Layer.OVERLAY)
+            Gtk4LayerShell.set_anchor(window, Gtk4LayerShell.Edge.TOP, True)
+            Gtk4LayerShell.set_anchor(window, Gtk4LayerShell.Edge.RIGHT, True)
+            Gtk4LayerShell.set_margin(window, Gtk4LayerShell.Edge.TOP, 36)
+            Gtk4LayerShell.set_margin(window, Gtk4LayerShell.Edge.RIGHT, 8)
+            Gtk4LayerShell.set_keyboard_mode(
+                window, Gtk4LayerShell.KeyboardMode.ON_DEMAND
+            )
+
+            key_controller = Gtk.EventControllerKey()
+            key_controller.connect("key-pressed", self.on_key_pressed)
+            window.add_controller(key_controller)
+
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            card.add_css_class("airpods-card")
+            window.set_child(card)
+
+            picture = Gtk.Picture.new_for_filename(str(PRODUCT_IMAGE))
+            picture.set_size_request(340, 214)
+            picture.set_content_fit(Gtk.ContentFit.COVER)
+            picture.set_can_shrink(True)
+            picture.set_overflow(Gtk.Overflow.HIDDEN)
+            picture.add_css_class("hero")
+            card.append(picture)
+
+            copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            copy.set_margin_start(8)
+            copy.set_margin_end(8)
+            copy.set_margin_top(2)
+            card.append(copy)
+
+            heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            copy.append(heading)
+
+            title = Gtk.Label(label="AirPods Pro", xalign=0)
+            title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.add_css_class("device-title")
+            heading.append(title)
+            self.title_label = title
+
+            settings = Gtk.Button(icon_name="preferences-system-symbolic")
+            settings.add_css_class("icon-button")
+            settings.set_tooltip_text("Open Bluetooth Settings")
+            settings.set_accessible_role(Gtk.AccessibleRole.BUTTON)
+            settings.connect("clicked", self.open_settings)
+            heading.append(settings)
+
+            status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            copy.append(status_row)
+            dot = Gtk.Label(label="●")
+            dot.add_css_class("status-dot")
+            status_row.append(dot)
+            self.status_dot = dot
+            status = Gtk.Label(label="Not connected", xalign=0)
+            status.add_css_class("status-label")
+            status_row.append(status)
+            self.status_label = status
+
+            battery_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            battery_box.set_margin_start(8)
+            battery_box.set_margin_end(8)
+            battery_box.add_css_class("battery")
+            battery_label = Gtk.Label(label="Battery", xalign=0)
+            battery_label.set_hexpand(True)
+            battery_box.append(battery_label)
+            battery_value = Gtk.Label(label="")
+            battery_value.add_css_class("battery-value")
+            battery_box.append(battery_value)
+            card.append(battery_box)
+            self.battery_box = battery_box
+            self.battery_value = battery_value
+
+            error = Gtk.Label(label="", xalign=0)
+            error.set_wrap(True)
+            error.set_visible(False)
+            error.set_margin_start(8)
+            error.set_margin_end(8)
+            error.add_css_class("error-label")
+            card.append(error)
+            self.error_label = error
+
+            action = Gtk.Button(label="Connect")
+            action.set_margin_start(8)
+            action.set_margin_end(8)
+            action.add_css_class("airpods-action")
+            action.connect("clicked", self.on_action)
+            card.append(action)
+            self.action_button = action
+
+            hint = Gtk.Label(
+                label="Right-click the bar item for a quick connect.", xalign=0.5
+            )
+            hint.set_margin_bottom(4)
+            hint.add_css_class("hint")
+            card.append(hint)
+
+        def on_close(self, _window: Gtk.Window) -> bool:
+            self.window = None
+            self.quit()
+            return False
+
+        def on_key_pressed(
+            self,
+            _controller: Gtk.EventControllerKey,
+            keyval: int,
+            _keycode: int,
+            _state: Gdk.ModifierType,
+        ) -> bool:
+            if keyval == Gdk.KEY_Escape and self.window is not None:
+                self.window.close()
+                return True
+            return False
+
+        def open_settings(self, _button: Gtk.Button) -> None:
+            if shutil.which("blueman-manager"):
+                subprocess.Popen(
+                    ["blueman-manager"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            if self.window is not None:
+                self.window.close()
+
+        def refresh(self) -> bool:
+            if self.window is None:
+                return GLib.SOURCE_REMOVE
+            state = get_state()
+            assert self.title_label is not None
+            assert self.status_label is not None
+            assert self.status_dot is not None
+            assert self.battery_box is not None
+            assert self.battery_value is not None
+            assert self.action_button is not None
+
+            self.title_label.set_label(state["name"])
+            for css_class in ("connected", "disconnected", "warning"):
+                self.status_dot.remove_css_class(css_class)
+            self.action_button.remove_css_class("disconnect")
+
+            if not state["available"]:
+                self.status_label.set_label("Not paired")
+                self.status_dot.add_css_class("warning")
+                self.action_button.set_label("Open Bluetooth Settings")
+            elif state["connected"]:
+                self.status_label.set_label("Connected")
+                self.status_dot.add_css_class("connected")
+                self.action_button.set_label("Disconnect")
+                self.action_button.add_css_class("disconnect")
+            elif not state["powered"]:
+                self.status_label.set_label("Bluetooth off")
+                self.status_dot.add_css_class("disconnected")
+                self.action_button.set_label("Connect")
+            else:
+                self.status_label.set_label("Not connected")
+                self.status_dot.add_css_class("disconnected")
+                self.action_button.set_label("Connect")
+
+            show_battery = state["connected"] and state["battery"] is not None
+            self.battery_box.set_visible(show_battery)
+            if show_battery:
+                self.battery_value.set_label(f"{state['battery']}%")
+            self.action_button.set_sensitive(not self.busy)
+            return GLib.SOURCE_CONTINUE
+
+        def on_action(self, _button: Gtk.Button) -> None:
+            if self.busy:
+                return
+            state = get_state()
+            if not state["available"]:
+                self.open_settings(_button)
+                return
+            action = "disconnect" if state["connected"] else "connect"
+            self.busy = True
+            assert self.action_button is not None
+            assert self.error_label is not None
+            self.action_button.set_sensitive(False)
+            self.action_button.set_label(
+                "Disconnecting…" if action == "disconnect" else "Connecting…"
+            )
+            self.error_label.set_visible(False)
+            threading.Thread(
+                target=self.perform_action, args=(action,), daemon=True
+            ).start()
+
+        def perform_action(self, action: str) -> None:
+            error_message = ""
+            try:
+                perform_device_action(action)
+            except AirPodsError as error:
+                error_message = str(error)
+            GLib.idle_add(self.action_finished, error_message)
+
+        def action_finished(self, error_message: str) -> bool:
+            self.busy = False
+            assert self.error_label is not None
+            if error_message:
+                self.error_label.set_label(error_message)
+                self.error_label.set_visible(True)
+            signal_waybar()
+            self.refresh()
+            return GLib.SOURCE_REMOVE
+
+    return AirPodsPopup().run([])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "command",
+        choices=(
+            "status",
+            "connect",
+            "disconnect",
+            "toggle",
+            "popup",
+            "guard",
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.command == "status":
+        return waybar_status()
+    if args.command in ("connect", "disconnect", "toggle"):
+        return run_action(args.command, notify=True)
+    if args.command == "guard":
+        return run_guard()
+    return run_popup()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

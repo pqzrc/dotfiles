@@ -14,6 +14,7 @@
   "modules-right": [
     "group/tray-drawer",
     "custom/screenrecording-indicator",
+    "custom/airpods",
     "cpu",
     "memory",
     "disk",
@@ -35,6 +36,16 @@
   "custom/expand": {
     "format": "❮",
     "tooltip": false
+  },
+  "custom/airpods": {
+    "exec": "~/Scripts/airpods status",
+    "return-type": "json",
+    "interval": 3,
+    "signal": 9,
+    "format": "{text}",
+    "max-length": 20,
+    "on-click": "~/Scripts/airpods popup >/dev/null 2>&1 &",
+    "on-click-right": "~/Scripts/airpods toggle"
   },
   "custom/screenrecording-indicator": {
     "on-click": "~/Scripts/screenrecord",
